@@ -1,0 +1,320 @@
+[sources.in]
+  type = "syslog" # required
+  address = "0.0.0.0:514" # required, required when mode = "tcp" or mode = "udp"
+  mode = "udp" # required
+
+[transforms.in_addall]
+  type = "add_fields" # required
+  inputs = ["in"] # required
+  fields.observer.name = 'pfsense'
+  fields.observer.product = 'mini'
+  fields.observer.serial_number = '123'
+  fields."@timestamp" = "{{ timestamp }}"
+  
+[transforms.swim]
+  type = "swimlanes" # required
+  inputs = ["in_addall"] # required
+
+## Firewall
+### filterlog
+[transforms.swim.lanes.firewall]
+  type = "check_fields"
+  "hostname.eq" = "filterlog"
+
+## Transform common fields
+[transforms.fw_split]
+  type = "split"
+  inputs = ["swim.firewall"]
+  field = "message"
+  separator = ","
+  field_names = ["pfsense.rule_number","pfsense.sub_rule_number","pfsense.anchor","pfsense.tracking_id","network.interface","pfsense.reason","pfsense.action","pfsense.direction","pfsense.ipversion","field1","field2","field3","field4","field5","field6","field7","field8","field9","field10","field11","field12","field13","field14","field15","field16","field17","field18","field19","field20","field21","field22","field23","field24"]
+
+[transforms.fw_add1]
+  type = "add_fields" # required
+  inputs = ["fw_split"] # required
+  fields.observer.type = "firewall"
+  fields.event.action = "network_flow"
+  fields.event.category = ["network_traffic","network"]
+  fields.event.type = "{{ pfsense.action }}"
+  fields.event.kind = "event"
+  fields.ecs.version = "1.5.0"
+  fields.flow.final = true
+  fields.network.direction = "{{ pfsense.direction }}bound"
+  fields.rule.id = "{{ pfsense.rule_number }}"
+  #fields.
+
+## Swim on ip version
+[transforms.swim2]
+  type = "swimlanes" # required
+  inputs = ["fw_add1"] # required
+
+[transforms.swim2.lanes.fwip4]
+  type = "check_fields"
+  "pfsense.ipversion.eq" = "4"
+
+[transforms.swim2.lanes.ip6]
+  type = "check_fields"
+  "pfsense.ipversion.eq" = "6"
+## End Swim on ip version
+
+## IP v4
+[transforms.fwip4_rename_main]
+  type = "rename_fields"
+  inputs = ["swim2.fwip4"]
+  #Rename fields
+  fields.field1 = "pfsense.ip4.tos"
+  fields.field2 = "pfsense.ip4.ecn"
+  fields.field3 = "pfsense.ip4.ttl"
+  fields.field4 = "pfsense.ip4.id"
+  fields.field5 = "pfsense.ip4.offset"
+  fields.field6 = "pfsense.ip4.flags"
+  fields.field7 = "pfsense.ip4.protocolid"
+  fields.field8 = "network.transport"
+  fields.field9 = "network.bytes"
+  fields.field10 = "source.ip"
+  fields.field11 = "destination.ip"
+  fields.host = "fields.pfsense.host"
+
+[transforms.fwip4_add1]
+  type = "add_fields" # required
+  inputs = ["fwip4_rename_main"] # required
+  fields.network.type = "ipv4"
+  fields.network.iana_number = "{{ pfsense.ip4.protocolid }}"
+  fields.destination.address = "{{ destination.ip }}"
+  fields.source.address = "{{ source.ip }}"
+  
+
+[transforms.fwip4_geoip4_src]
+  type = "geoip" # required
+  inputs = ["fwip4_add1"] # required
+  database = "/etc/vector/GeoLite2-City.mmdb" # required
+  source = "source.ip" # required
+  target = "source.geo" # optional, default
+
+[transforms.fwip4_geoip4_src_add1]
+  type = "add_fields" # required
+  inputs = ["fwip4_geoip4_src"] # required
+  # Fields
+  fields.source.geo.country_iso_code = "{{ source.geo.country_code }}"
+  fields.source.geo.location.lat = "{{ source.geo.latitude }}"
+  fields.source.geo.location.lon = "{{ source.geo.longitude }}"
+
+[transforms.fwip4_geoip4]
+  type = "geoip" # required
+  inputs = ["fwip4_geoip4_src_add1"] # required
+  database = "/etc/vector/GeoLite2-City.mmdb" # required
+  source = "destination.ip" # required
+  target = "destination.geo" # optional, default
+
+[transforms.fwip4_geoip4_add1]
+  type = "add_fields" # required
+  inputs = ["fwip4_geoip4"] # required
+  # Fields
+  fields.destination.geo.country_iso_code = "{{ destination.geo.country_code }}"
+  fields.destination.geo.location.lat = "{{ destination.geo.latitude }}"
+  fields.destination.geo.location.lon = "{{ destination.geo.longitude }}"
+
+[transforms.swim_fwip4_transport]
+  type = "swimlanes" # required
+  inputs = ["fwip4_geoip4_add1"] # required
+
+[transforms.swim_fwip4_transport.lanes.fwip4_ip4]
+  type = "check_fields"
+  "pfsense.ipversion.eq" = "4"
+  "network.transport.contains" = ["tcp", "udp"]
+
+[transforms.swim_fwip4_transport.lanes.fwip4_ip4other]
+  type = "check_fields"
+  "pfsense.ipversion.eq" = "4"
+  "network.transport.not_contains" = ["tcp", "udp"]
+
+[transforms.fwip4_ready]
+  type = "rename_fields"
+  inputs = ["swim_fwip4_transport.fwip4_ip4"]
+  #Rename fields
+  fields.field12 = "source.port"
+  fields.field13 = "destination.port"
+  fields.field14 = "pfsense.ip4.data_length"
+  fields.field15 = "pfsesne.ip4.tcp.tcp_flags"
+  fields.field16 = "pfsesne.ip4.tcp.sequence_number"
+  fields.field17 = "pfsesne.ip4.tcp.ack"
+  fields.field18 = "pfsesne.ip4.tcp.window"
+  fields.field19 = "pfsesne.ip4.tcp.urg"
+  fields.field20 = "pfsesne.ip4.tcp.options"
+
+[transforms.swim4_ip4tcp]
+  type = "swimlanes" # required
+  inputs = ["fwip4_ready"] # required
+
+[transforms.swim4_ip4tcp.lanes.fwip4_inbound]
+  type = "check_fields"
+  "pfsense.direction.eq" = "in"
+
+
+[transforms.swim4_ip4tcp.lanes.fwip4_outbound]
+  type = "check_fields"
+  "pfsense.direction.eq" = "out"
+
+
+[transforms.fwip4_inbound_add]
+  type = "add_fields"
+  inputs = ["swim4_ip4tcp.fwip4_inbound"]
+  fields.source.bytes = "{{ network.bytes }}"
+
+[transforms.fwip4_outbound_add]
+  type = "add_fields"
+  inputs = ["swim4_ip4tcp.fwip4_outbound"]
+  fields.destination.bytes = "{{ network.bytes }}"
+
+[transforms.fwip4_other_final]
+  type = "rename_fields"
+  inputs = ["swim_fwip4_transport.fwip4_ip4other"]
+  #Rename fields
+  fields.field12 = "pfsense.ip4.other.otherfield1"
+  fields.field13 = "pfsense.ip4.other.otherfield2"
+  fields.field14 = "pfsense.ip4.other.otherfield3"
+  fields.field15 = "pfsense.ip4.other.otherfield4"
+  fields.field16 = "pfsense.ip4.other.otherfield5"
+
+## End IP v4
+
+## IP v6
+[transforms.fwip6_rename_main]
+  type = "rename_fields"
+  inputs = ["swim2.ip6"]
+  #Rename fields
+  fields.field1 = "pfsense.ip6.class"
+  fields.field2 = "pfsense.ip6.flow_label"
+  fields.field3 = "pfsense.ip6.hop_limit"
+  fields.field4 = "network.transport"
+  fields.field5 = "pfsense.ip6.protocolid"
+  fields.field6 = "network.bytes"
+  fields.field7 = "source.ip"
+  fields.field8 = "destination.ip"
+  fields.host = "fields.pfsense.host"
+
+[transforms.fwip6_add1]
+  type = "add_fields" # required
+  inputs = ["fwip6_rename_main"] # required
+  fields.network.type = "ipv6"
+  fields.network.iana_number = "{{ pfsense.ip6.protocolid }}"
+  fields.destination.address = "{{ destination.ip }}"
+  fields.source.address = "{{ source.ip }}"
+
+[transforms.swim_fwip6_transport]
+  type = "swimlanes" # required
+  inputs = ["fwip6_add1"] # required
+
+[transforms.swim_fwip6_transport.lanes.fwip6_ip6]
+  type = "check_fields"
+  "pfsense.ipversion.eq" = "6"
+  "network.transport.contains" = ["tcp", "udp"]
+
+[transforms.swim_fwip6_transport.lanes.fwip6_ip6other]
+  type = "check_fields"
+  "pfsense.ipversion.eq" = "6"
+  "network.transport.not_contains" = ["tcp", "udp"]
+
+[transforms.fwip6_ready]
+  type = "rename_fields"
+  inputs = ["swim_fwip6_transport.fwip6_ip6"]
+  #Rename fields
+  fields.field9 = "source.port"
+  fields.field10 = "destination.port"
+  fields.field11 = "pfsense.ip6.data_length"
+  fields.field12 = "pfsesne.ip6.tcp.tcp_flags"
+  fields.field13 = "pfsesne.ip6.tcp.sequence_number"
+  fields.field14 = "pfsesne.ip6.tcp.ack"
+  fields.field15 = "pfsesne.ip6.tcp.window"
+  fields.field16 = "pfsesne.ip6.tcp.urg"
+  fields.field17 = "pfsesne.ip6.tcp.options"
+
+[transforms.fwip6_other_final]
+  type = "rename_fields"
+  inputs = ["swim_fwip6_transport.fwip6_ip6other"]
+  #Rename fields
+  fields.field9 = "pfsense.ip6.other.otherfield1"
+  fields.field10 = "pfsense.ip6.other.otherfield2"
+  fields.field11 = "pfsense.ip6.other.otherfield3"
+  fields.field12 = "pfsense.ip6.other.otherfield4"
+  fields.field13 = "pfsense.ip6.other.otherfield5"
+  fields.field14 = "pfsense.ip6.other.otherfield6"
+  fields.field15 = "pfsense.ip6.other.otherfield7"
+  fields.field16 = "pfsense.ip6.other.otherfield8"
+  fields.field17 = "pfsense.ip6.other.otherfield9"
+  fields.field18 = "pfsense.ip6.other.otherfield10"
+## End IP v6
+
+# Sinks
+[sinks.firewallip4out]
+  type = "elasticsearch" # required
+  host = "https://127.0.0.1:9201" # optional, no default
+  index = "network-pfsense-traffic-ip4-2" # optional, default
+  inputs = ["fwip4_outbound_add"] # required
+  auth.strategy = "basic"
+  auth.user = "vector_svc"
+  auth.password = ""
+  tls.verify_certificate = false # optional, default
+  tls.verify_hostname = false
+
+[sinks.firewallip4in]
+  type = "elasticsearch" # required
+  host = "https://127.0.0.1:9201" # optional, no default
+  index = "network-pfsense-traffic-ip4-2" # optional, default
+  inputs = ["fwip4_inbound_add"] # required
+  auth.strategy = "basic"
+  auth.user = "vector_svc"
+  auth.password = ""
+  tls.verify_certificate = false # optional, default
+  tls.verify_hostname = false
+
+[sinks.firewallip4other]
+  type = "elasticsearch" # required
+  host = "https://127.0.0.1:9201" # optional, no default
+  index = "network-pfsense-traffic-ip4-2" # optional, default
+  inputs = ["fwip4_other_final"] # required
+  auth.strategy = "basic"
+  auth.user = "vector_svc"
+  auth.password = ""
+  tls.verify_certificate = false # optional, default
+  tls.verify_hostname = false
+
+[sinks.firewallip6]
+  type = "elasticsearch" # required
+  host = "https://127.0.0.1:9201" # optional, no default
+  index = "network-pfsense-traffic-ip6-2" # optional, default
+  inputs = ["fwip6_ready"] # required
+  auth.strategy = "basic"
+  auth.user = "vector_svc"
+  auth.password = ""
+  tls.verify_certificate = false # optional, default
+  tls.verify_hostname = false
+
+[sinks.firewallip6other]
+  type = "elasticsearch" # required
+  host = "https://127.0.0.1:9201" # optional, no default
+  index = "network-pfsense-traffic-ip6-2" # optional, default
+  inputs = ["fwip6_other_final"] # required
+  auth.strategy = "basic"
+  auth.user = "vector_svc"
+  auth.password = ""
+  tls.verify_certificate = false # optional, default
+  tls.verify_hostname = false
+
+### End filterlog
+
+# Other
+[transforms.swim.lanes.other]
+  type = "check_fields"
+  "hostname.neq" = "filterlog"  
+
+[sinks.other]
+  type = "elasticsearch" # required
+  host = "https://127.0.0.1:9201" # optional, no default
+  index = "network-pfsense-other-2" # optional, default
+  inputs = ["swim.other"] # required
+  auth.strategy = "basic"
+  auth.user = "vector_svc"
+  auth.password = ""
+  tls.verify_certificate = false # optional, default
+  tls.verify_hostname = false
